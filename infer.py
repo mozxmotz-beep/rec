@@ -27,6 +27,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from dataset import FeatureSchema, PCVRParquetDataset, NUM_TIME_BUCKETS
+from feature_engineering import get_temporal_feature_dim
 from model import PCVRHyFormer, ModelInput
 
 
@@ -162,8 +163,10 @@ def resolve_model_cfg(train_config: Dict[str, Any]) -> Dict[str, Any]:
 def build_model(
     dataset: PCVRParquetDataset,
     model_cfg: Dict[str, Any],
+    train_config: Optional[Dict[str, Any]] = None,
     ns_groups_json: Optional[str] = None,
     device: str = 'cpu',
+    user_dense_dim_override: Optional[int] = None,
 ) -> PCVRHyFormer:
     """Construct a ``PCVRHyFormer`` from the dataset schema, an NS-groups JSON,
     and a resolved ``model_cfg`` dict.
@@ -221,10 +224,20 @@ def build_model(
         dataset.item_int_schema, dataset.item_int_vocab_sizes)
 
     logging.info(f"Building PCVRHyFormer with cfg: {model_cfg}")
+    enable_temporal_features = bool((train_config or {}).get('enable_temporal_features', True))
+    user_dense_dim = (
+        int(user_dense_dim_override)
+        if user_dense_dim_override is not None
+        else dataset.user_dense_schema.total_dim + (
+            get_temporal_feature_dim(len(dataset.seq_domains))
+            if enable_temporal_features and dataset.seq_domains else 0
+        )
+    )
+
     model = PCVRHyFormer(
         user_int_feature_specs=user_int_feature_specs,
         item_int_feature_specs=item_int_feature_specs,
-        user_dense_dim=dataset.user_dense_schema.total_dim,
+        user_dense_dim=user_dense_dim,
         item_dense_dim=dataset.item_dense_schema.total_dim,
         seq_vocab_sizes=dataset.seq_domain_vocab_sizes,
         user_ns_groups=user_ns_groups,
@@ -266,6 +279,15 @@ def get_ckpt_path() -> Optional[str]:
         if item.endswith(".pt"):
             return os.path.join(ckpt_path, item)
     return None
+
+
+def get_ckpt_user_dense_dim(ckpt_path: str, device: str) -> Optional[int]:
+    """Read expected user_dense input dim directly from checkpoint weight."""
+    state_dict = torch.load(ckpt_path, map_location=device)
+    w = state_dict.get('user_dense_proj.0.weight')
+    if w is None or getattr(w, 'ndim', 0) != 2:
+        return None
+    return int(w.shape[1])
 
 
 def _batch_to_model_input(
@@ -344,6 +366,18 @@ def main() -> None:
     total_test_samples = test_dataset.num_rows
     logging.info(f"Total test samples: {total_test_samples}")
 
+    ckpt_path = get_ckpt_path()
+    if ckpt_path is None:
+        raise FileNotFoundError(
+            f"No *.pt file found under MODEL_OUTPUT_PATH={model_dir!r}. "
+            f"The directory contains: {os.listdir(model_dir) if model_dir and os.path.isdir(model_dir) else 'N/A'}. "
+            "This typically means the training job wrote only the sidecar "
+            "files (schema.json / train_config.json) for this step but did "
+            "not persist model.pt — a symptom of a race between "
+            "_remove_old_best_dirs and EarlyStopping.save_checkpoint."
+        )
+    logging.info(f"Loading checkpoint metadata from {ckpt_path}")
+
     # ---- Build model: every structural hyperparameter is resolved from train_config ----
     model_cfg = resolve_model_cfg(train_config)
 
@@ -361,21 +395,27 @@ def main() -> None:
     model = build_model(
         test_dataset,
         model_cfg=model_cfg,
+        train_config=train_config,
         ns_groups_json=ns_groups_json,
         device=device,
     )
 
-    # ---- Strictly load weights ----
-    ckpt_path = get_ckpt_path()
-    if ckpt_path is None:
-        raise FileNotFoundError(
-            f"No *.pt file found under MODEL_OUTPUT_PATH={model_dir!r}. "
-            f"The directory contains: {os.listdir(model_dir) if model_dir and os.path.isdir(model_dir) else 'N/A'}. "
-            "This typically means the training job wrote only the sidecar "
-            "files (schema.json / train_config.json) for this step but did "
-            "not persist model.pt — a symptom of a race between "
-            "_remove_old_best_dirs and EarlyStopping.save_checkpoint."
+    ckpt_user_dense_dim = get_ckpt_user_dense_dim(ckpt_path, device)
+    if ckpt_user_dense_dim is not None and model.user_dense_proj[0].in_features != ckpt_user_dense_dim:
+        logging.warning(
+            "Rebuilding model with checkpoint-derived user_dense_dim=%d (computed=%d) to avoid shape mismatch.",
+            ckpt_user_dense_dim, model.user_dense_proj[0].in_features,
         )
+        model = build_model(
+            test_dataset,
+            model_cfg=model_cfg,
+            train_config=train_config,
+            ns_groups_json=ns_groups_json,
+            device=device,
+            user_dense_dim_override=ckpt_user_dense_dim,
+        )
+
+    # ---- Strictly load weights ----
     logging.info(f"Loading checkpoint from {ckpt_path}")
     load_model_state_strict(model, ckpt_path, device)
     model.eval()

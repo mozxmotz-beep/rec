@@ -147,6 +147,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--focal_gamma', type=float, default=2.0,
                         help='Focal Loss focusing parameter gamma '
                              '(effective only when --loss_type=focal)')
+    parser.add_argument('--debias_mode', type=str, default='none', choices=['none', 'ips'],
+                        help='Training debias mode: none or ips weighting.')
+    parser.add_argument('--ips_clip_min', type=float, default=1.0,
+                        help='IPS weight lower bound (effective when --debias_mode=ips).')
+    parser.add_argument('--ips_clip_max', type=float, default=20.0,
+                        help='IPS weight upper bound (effective when --debias_mode=ips).')
+    parser.add_argument('--propensity_key', type=str, default='position_propensity',
+                        help='Batch tensor key for propensity values used by IPS.')
 
     # Sparse optimizer.
     parser.add_argument('--sparse_lr', type=float, default=0.05,
@@ -197,6 +205,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--item_ns_tokens', type=int, default=0,
                         help='Number of item NS tokens in rankmixer mode '
                              '(0 = automatically use the number of item groups)')
+    parser.add_argument('--task_type', type=str, default='single',
+                        choices=['single', 'esmm_mmoe'],
+                        help='single: legacy CVR head; esmm_mmoe: CTR/CVR/CTCVR multi-task head.')
+    parser.add_argument('--num_experts', type=int, default=4,
+                        help='Number of MMOE experts when task_type=esmm_mmoe.')
 
     args = parser.parse_args()
 
@@ -357,6 +370,10 @@ def main() -> None:
         ns_groups_path=args.ns_groups_json if args.ns_groups_json and os.path.exists(args.ns_groups_json) else None,
         eval_every_n_steps=args.eval_every_n_steps,
         train_config=vars(args),
+        debias_mode=args.debias_mode,
+        ips_clip_min=args.ips_clip_min,
+        ips_clip_max=args.ips_clip_max,
+        propensity_key=args.propensity_key,
     )
 
     trainer.train()
@@ -367,8 +384,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-    parser.add_argument('--task_type', type=str, default='single',
-                        choices=['single', 'esmm_mmoe'],
-                        help='single: legacy CVR head; esmm_mmoe: CTR/CVR/CTCVR multi-task head.')
-    parser.add_argument('--num_experts', type=int, default=4,
-                        help='Number of MMOE experts when task_type=esmm_mmoe.')

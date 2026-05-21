@@ -591,6 +591,10 @@ class PCVRParquetDataset(IterableDataset):
             'label': torch.from_numpy(labels),
             'click_label': torch.from_numpy(click_labels),
             'timestamp': torch.from_numpy(timestamps),
+            # Default propensity placeholder (all ones). If upstream logs
+            # provide calibrated position propensity, overwrite this key in a
+            # custom dataset wrapper or collate_fn.
+            'position_propensity': torch.ones(B, dtype=torch.float32),
             'user_id': user_ids,
             '_seq_domains': self.seq_domains,
         }

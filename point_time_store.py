@@ -16,7 +16,8 @@ class EntityStats:
 class PointTimeFeatureStore:
     """In-memory point-in-time store supporting online updates.
 
-    Keyed by (namespace, entity_id), e.g. ("user", 123) or ("user_cate", "123#88").
+    Keyed by (namespace, entity_id), e.g. ("user", "123") or
+    ("user_cate", "123#88").
     """
 
     def __init__(self, half_life_days: float = 14.0) -> None:
@@ -55,4 +56,17 @@ class PointTimeFeatureStore:
             "conv_cnt": st.conv_cnt,
             "ctr_smooth": ctr,
             "cvr_smooth": cvr,
+        }
+
+    def snapshot_user_item_history(self, user_id: str, author_id: str, cate_id: str, brand_id: str, ts: int) -> Dict[str, Dict[str, float]]:
+        return {
+            "user_author": self.snapshot("user_author", f"{user_id}#{author_id}", ts),
+            "user_cate": self.snapshot("user_cate", f"{user_id}#{cate_id}", ts),
+            "user_brand": self.snapshot("user_brand", f"{user_id}#{brand_id}", ts),
+        }
+
+    def snapshot_item_multi_window(self, item_id: str, ts: int) -> Dict[str, Dict[str, float]]:
+        return {
+            "1h": self.snapshot("item_1h", item_id, ts),
+            "24h": self.snapshot("item_24h", item_id, ts),
         }

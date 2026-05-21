@@ -58,6 +58,10 @@ class PCVRHyFormerRankingTrainer:
         ns_groups_path: Optional[str] = None,
         eval_every_n_steps: int = 0,
         train_config: Optional[Dict[str, Any]] = None,
+        debias_mode: str = 'none',
+        ips_clip_min: float = 1.0,
+        ips_clip_max: float = 20.0,
+        propensity_key: str = 'position_propensity',
     ) -> None:
         self.model: nn.Module = model
         self.train_loader: DataLoader = train_loader
@@ -108,10 +112,15 @@ class PCVRHyFormerRankingTrainer:
         self.eval_every_n_steps: int = eval_every_n_steps
         self.train_config: Optional[Dict[str, Any]] = train_config
         self.task_type: str = (train_config or {}).get('task_type', 'single')
+        self.debias_mode: str = debias_mode
+        self.ips_clip_min: float = ips_clip_min
+        self.ips_clip_max: float = ips_clip_max
+        self.propensity_key: str = propensity_key
 
         logging.info(f"PCVRHyFormerRankingTrainer loss_type={loss_type}, "
                      f"focal_alpha={focal_alpha}, focal_gamma={focal_gamma}, "
-                     f"reinit_sparse_after_epoch={reinit_sparse_after_epoch}")
+                     f"reinit_sparse_after_epoch={reinit_sparse_after_epoch}, "
+                     f"debias_mode={debias_mode}, propensity_key={propensity_key}")
 
     def _build_step_dir_name(self, global_step: int, is_best: bool = False) -> str:
         """Build a checkpoint sub-directory name such as
@@ -411,19 +420,41 @@ class PCVRHyFormerRankingTrainer:
 
         model_input = self._make_model_input(device_batch)
         logits = self.model(model_input)
+        sample_weight = None
+        if self.debias_mode == 'ips':
+            propensity = device_batch.get(self.propensity_key)
+            if propensity is not None:
+                propensity = propensity.float().clamp(min=1e-6)
+                sample_weight = (1.0 / propensity).clamp(
+                    min=self.ips_clip_min, max=self.ips_clip_max)
+
         if self.task_type == 'esmm_mmoe':
             click_label = device_batch['click_label'].float()
             ctr_logit = logits[:, 0]
             ctcvr_logit = logits[:, 2]
-            loss_ctr = F.binary_cross_entropy_with_logits(ctr_logit, click_label)
-            loss_ctcvr = F.binary_cross_entropy_with_logits(ctcvr_logit, label)
+            loss_ctr = F.binary_cross_entropy_with_logits(
+                ctr_logit, click_label, reduction='none')
+            loss_ctcvr = F.binary_cross_entropy_with_logits(
+                ctcvr_logit, label, reduction='none')
+            if sample_weight is not None:
+                norm = sample_weight.mean().clamp(min=1e-6)
+                loss_ctr = (loss_ctr * sample_weight / norm).mean()
+                loss_ctcvr = (loss_ctcvr * sample_weight / norm).mean()
+            else:
+                loss_ctr = loss_ctr.mean()
+                loss_ctcvr = loss_ctcvr.mean()
             loss = 0.5 * (loss_ctr + loss_ctcvr)
         else:
             logits = logits.squeeze(-1)  # (B,)
             if self.loss_type == 'focal':
                 loss = sigmoid_focal_loss(logits, label, alpha=self.focal_alpha, gamma=self.focal_gamma)
             else:
-                loss = F.binary_cross_entropy_with_logits(logits, label)
+                raw_loss = F.binary_cross_entropy_with_logits(logits, label, reduction='none')
+                if sample_weight is not None:
+                    norm = sample_weight.mean().clamp(min=1e-6)
+                    loss = (raw_loss * sample_weight / norm).mean()
+                else:
+                    loss = raw_loss.mean()
         loss.backward()
         # foreach=False: avoids a PyTorch _foreach_norm CUDA kernel bug observed
         # with certain tensor shapes in this project.

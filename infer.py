@@ -27,6 +27,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from dataset import FeatureSchema, PCVRParquetDataset, NUM_TIME_BUCKETS
+from feature_engineering import get_temporal_feature_dim
 from model import PCVRHyFormer, ModelInput
 
 
@@ -162,6 +163,7 @@ def resolve_model_cfg(train_config: Dict[str, Any]) -> Dict[str, Any]:
 def build_model(
     dataset: PCVRParquetDataset,
     model_cfg: Dict[str, Any],
+    train_config: Optional[Dict[str, Any]] = None,
     ns_groups_json: Optional[str] = None,
     device: str = 'cpu',
 ) -> PCVRHyFormer:
@@ -221,10 +223,16 @@ def build_model(
         dataset.item_int_schema, dataset.item_int_vocab_sizes)
 
     logging.info(f"Building PCVRHyFormer with cfg: {model_cfg}")
+    enable_temporal_features = bool((train_config or {}).get('enable_temporal_features', True))
+    user_dense_dim = dataset.user_dense_schema.total_dim + (
+        get_temporal_feature_dim(len(dataset.seq_domains))
+        if enable_temporal_features and dataset.seq_domains else 0
+    )
+
     model = PCVRHyFormer(
         user_int_feature_specs=user_int_feature_specs,
         item_int_feature_specs=item_int_feature_specs,
-        user_dense_dim=dataset.user_dense_schema.total_dim,
+        user_dense_dim=user_dense_dim,
         item_dense_dim=dataset.item_dense_schema.total_dim,
         seq_vocab_sizes=dataset.seq_domain_vocab_sizes,
         user_ns_groups=user_ns_groups,
@@ -361,6 +369,7 @@ def main() -> None:
     model = build_model(
         test_dataset,
         model_cfg=model_cfg,
+        train_config=train_config,
         ns_groups_json=ns_groups_json,
         device=device,
     )

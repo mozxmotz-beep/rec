@@ -24,7 +24,7 @@ import torch
 import torch.multiprocessing
 from torch.utils.data import IterableDataset, DataLoader
 from typing import Any, Dict, Iterator, List, Optional, Tuple
-from feature_engineering import build_temporal_features
+from feature_engineering import build_temporal_features, get_temporal_feature_dim
 
 # numpy.typing is available since numpy >= 1.20; on older numpy fall back to a
 # no-op shim so that forward-referenced annotations like ``npt.NDArray[np.int64]``
@@ -591,6 +591,10 @@ class PCVRParquetDataset(IterableDataset):
             'label': torch.from_numpy(labels),
             'click_label': torch.from_numpy(click_labels),
             'timestamp': torch.from_numpy(timestamps),
+            # Default propensity placeholder (all ones). If upstream logs
+            # provide calibrated position propensity, overwrite this key in a
+            # custom dataset wrapper or collate_fn.
+            'position_propensity': torch.ones(B, dtype=torch.float32),
             'user_id': user_ids,
             '_seq_domains': self.seq_domains,
         }
@@ -692,6 +696,8 @@ class PCVRParquetDataset(IterableDataset):
             )
 
         expected_dense_dim = self.user_dense_schema.total_dim
+        if self.enable_temporal_features and self.seq_domains:
+            expected_dense_dim += get_temporal_feature_dim(len(self.seq_domains))
         current_dense_dim = result['user_dense_feats'].shape[1]
         if current_dense_dim != expected_dense_dim:
             logging.warning(
